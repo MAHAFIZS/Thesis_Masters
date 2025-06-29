@@ -1,0 +1,167 @@
+timer_muovi: { Type: ScheduledTimer, DesiredRate: 200}
+
+timer_subs: { Type: DecimatorTimer, Inputs: [ timer_muovi ], DesiredRate: 10 }
+
+#------------------------------------------------------------------------------------------------------
+# Data aquisition 
+#------------------------------------------------------------------------------------------------------
+muovi: { Type: Muovi, Inputs: [ timer_muovi ], DesiredRate: 200, Params: [2]}
+
+EMG_raw: { Type: Split, Inputs: [ muovi ], Params: [32,1], 
+    Path: C:\\Users\\z004zrxh\\Development\\DataDump\\213
+    }
+
+IMU_raw: { 
+  Type: Split, 
+  Inputs: [ muovi ], 
+  Params: [32,2], 
+  #Path: 'D:\\Hafiz_intuitiveRobotControl\\imu_data\\imu_raw.txt' 
+}
+
+#-------------------------------------------------------------- ----------------------------------------
+# IMU processing
+#------------------------------------------------------------------------------------------------------
+
+OrientationY_sub: {Type: Resampler, Inputs: [IMU_raw,timer_subs], Params: [vector]}
+
+OrientationY: {Type: OrientationY, Inputs: [OrientationY_sub]}
+
+#------------------------------------------------------------------------------------------------------
+# EMG Preprocessing
+#------------------------------------------------------------------------------------------------------
+
+EMG_Notch: {
+    # notch filter
+    Type: Filter,
+    Inputs: [ EMG_raw ],
+    Params: [1.0000;-1.9754;1.0000,1.0000;-1.9754;1.0000 ], # 1 order bandstop  filter ([50Hz 50Hz])
+    #Params: [0.99776103;-1.97095386;0.99776103, 1.0;-1.97095386;0.99552205] # IRR-notch filter at 50 Hz Quality factor 35 (fs = 2000)
+    
+  }
+
+EMG_BP: {
+    Type: Filter,
+    Inputs: [ EMG_Notch],
+    #Params: [0.0976; 0.1953; 0.0976, 1.0000; -0.9428; 0.3333], # 2nd order lp filter (250Hz) (fs = 2000)
+    #Params: [ 0.2838;0.0;-0.5675;0.0;0.2838,1.0;-1.9738038;1.17181238;-0.36866453;0.17181238], # second order 10-500 Hz bandpass filter (fs = 2000)
+    Params: [0.2747; 0.0;-0.5495;0.0;0.2747,1.0;-1.9473;1.1725;-0.3932;0.1725],  # second order 20-500 Hz bandpass filter (fs = 2000)
+     #Params: [0.2929; 0.5858; 0.2929, 1.0000;-0.0000;0.1716] # second order lp filter (500Hz) (fs = 2000)
+    #Params: [0.2929; 0.5858; 0.2929, 1.0000;-0.0000;0.1716] # second order lp filter (500Hz) (fs = 200)   
+  }
+
+EMG_amp: { Type: Function, Inputs: [ EMG_BP ], Params: [ multiply:100], ##Path: C:\\Users\\z004zrxh\\OneDrive - Siemens Healthineers\\Documents\\data_dump 
+  }
+
+windowing: {
+    Type: Window,
+    Inputs: [EMG_amp],
+    Params: [420,210],
+    ##Path: 'C:\\Users\\z004zrxh\\OneDrive - Siemens Healthineers\\Master_Thesis\\data_imblocks'
+}
+
+#------------------------------------------------------------------------------------------------------
+# EMG Feature extraction
+#------------------------------------------------------------------------------------------------------
+
+
+feature_extraction: {
+    Type: FeaturesLibEMG,
+    Inputs: [windowing],
+    Params: [
+        "C:\\Users\\roblab\\AppData\\Local\\Programs\\Python\\Python312\\python312.dll",
+        4,
+        MAV,
+        WL,
+        ZC,
+        SSC
+    ],
+}
+
+#------------------------------------------------------------------------------------------------------
+# EMG Classification
+#------------------------------------------------------------------------------------------------------
+
+ground_truth: { Type: Trigger, Params: [
+       rest:0,
+       scroll_down:1,
+       lock:2,
+       unlock:3,
+       action_pos:4,
+       action_neg:5,
+       
+       ],
+ }
+
+buffer_trainings_data: { Type: Buffer, Inputs: [ ground_truth, -feature_extraction ] }
+
+SVM: { Type: PythonSVM, Inputs: [ feature_extraction ], Params: [ "C:\\Users\\roblab\\AppData\\Local\\Programs\\Python\\Python312\\python312.dll",  buffer_trainings_data , 0.5],
+
+    }
+
+
+#------------------------------------------------------------------------------------------------------
+# Paradigm
+#------------------------------------------------------------------------------------------------------
+
+
+
+safety_buffer: { Type: Safety_Buffer, Inputs: [ SVM ], Params: [10, 0, 6] }
+
+
+
+paradigm_Menu: { Type: ParadigmMenuOPT2, Inputs: [safety_buffer, OrientationY]}
+
+
+control_algorithm: {Type: ControlAlgorithm, Inputs: [udp_parser, paradigm_Menu], Params: [algorithm:Cartesian]}
+logger_control_algorithm:
+  Type: Logger
+  Inputs: [control_algorithm]
+  Path: "D:/Hafiz_intuitiveRobotControl/logs"
+
+send_to_unity: 
+  Type: UDP_StreamlinedSender
+  Inputs: [control_algorithm, OrientationY]
+  Params: [127.0.0.1, 5006]
+
+udp_receiver:
+  Type: UDP_Receiver
+  Params: [5005]
+
+udp_parser:
+  Type: TextParser
+  Inputs: [udp_receiver]
+  Params: ['split', ' ']
+
+udp_logger:
+  Type: Logger
+  Inputs: [udp_receiver]
+
+# Apply gain directly to UX control output
+robotGainConst: 
+  Type: Projector
+  Inputs: [control_algorithm]   # Direct from your UX menu control
+  Params: ['5']                # Adjust gain multiplier as needed
+
+# Optional: add offset (remove if not needed)
+robotGainConstAdd: 
+  Type: Function
+  Inputs: [robotGainConst]
+  Params: [add:1]              # Add constant offset of 1 (optional)
+
+# Combine original commands and gain-adjusted values (or just use gain-adjusted if you prefer)
+robotGain: 
+  Type: Joiner
+  Inputs: [control_algorithm, robotGainConstAdd]
+  Params: [timerBlockName:control_algorithm]
+
+logger_robotGain:
+  Type: Logger
+  Inputs: [robotGain]
+  Path: "D:/Hafiz_intuitiveRobotControl/logs/"
+
+# Final robot command sender block
+robot_max: 
+  Type: Panda
+  Inputs: [robotGain]
+  Params: ["169.254.105.210", "Cartesian Impedance"]  # Your robot IP & control mode
+  Path: 'C:\master_thesis_mehrkens\data_analysis\data'
